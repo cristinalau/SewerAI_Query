@@ -1,11 +1,37 @@
--- Ivara 10 "Unknown Facility" &
---          "Unknown Facility Type" 4= "Pipe" -> Pioneer "Mainline" -> PACP
---          "Unknown Facility Type" 5= "Catch Basin Lead" -> Pioneer "Mainline" -> PACP
---          "Unknown Facility Type" 6= "Service - Sanitary" -> Pioneer "Lateral" -> LACP
---          "Unknown Facility Type" 7= "Service - Storm" -> Pioneer "Lateral" -> LACP
---          "Unknown Facility Type" 8= "Service - Water" -> Pioneer "Lateral" -> LACP
---          "Unknown Facility Type" 3= "Manhole" -> Pioneer "Maintenance Hole (Manhole)" -> MACP
---          "Unknown Facility Type" 2= "Catch Basin" -> Pioneer "Maintenance Hole (Manhole)" -> MACP
+-- ============================================================================
+-- File: commented_sewerai_inspections_view.sql
+-- Purpose:
+--   Creates CUSTOMERDATA.SEWERAI_INSPECTIONS_V with added inline comments
+--   explaining how the output is built for MACP, PACP, and LACP inspection data.
+--
+-- Key note on the 4 elevation/depth fields:
+--   UP_ELEVATION           = upstream ground elevation
+--   UP_GRADE_TO_INVERT     = upstream depth from ground to pipe invert
+--   DOWN_ELEVATION         = downstream ground elevation
+--   DOWN_GRADE_TO_INVERT   = downstream depth from ground to pipe invert
+--
+--   In the query, these are calculated only in PACP (pipe inspections):
+--     UP_GRADE_TO_INVERT   = raw_usgroundelev_fl - raw_usinvertelev_fl
+--     DOWN_GRADE_TO_INVERT = raw_dsgroundelev_fl - raw_dsinvertelev_fl
+--
+--   So the hidden relationship is:
+--     upstream invert elevation   = UP_ELEVATION   - UP_GRADE_TO_INVERT
+--     downstream invert elevation = DOWN_ELEVATION - DOWN_GRADE_TO_INVERT
+--
+-- Important:
+--   Despite the name "GRADE_TO_INVERT", this is not slope or grade %.
+--   It is vertical depth from ground elevation down to the invert elevation.
+-- ============================================================================
+
+-- Ivara 10 "Unknown Facility" mappings:
+--   "Unknown Facility Type" 4 = "Pipe"                   -> Pioneer "Mainline"                     -> PACP
+--   "Unknown Facility Type" 5 = "Catch Basin Lead"      -> Pioneer "Mainline"                     -> PACP
+--   "Unknown Facility Type" 6 = "Service - Sanitary"    -> Pioneer "Lateral"                      -> LACP
+--   "Unknown Facility Type" 7 = "Service - Storm"       -> Pioneer "Lateral"                      -> LACP
+--   "Unknown Facility Type" 8 = "Service - Water"       -> Pioneer "Lateral"                      -> LACP
+--   "Unknown Facility Type" 3 = "Manhole"               -> Pioneer "Maintenance Hole (Manhole)"  -> MACP
+--   "Unknown Facility Type" 2 = "Catch Basin"           -> Pioneer "Maintenance Hole (Manhole)"  -> MACP
+
 SET DEFINE OFF;
 
 CREATE OR REPLACE FORCE EDITIONABLE VIEW "CUSTOMERDATA"."SEWERAI_INSPECTIONS_V" (
@@ -56,7 +82,11 @@ CREATE OR REPLACE FORCE EDITIONABLE VIEW "CUSTOMERDATA"."SEWERAI_INSPECTIONS_V" 
     "DRAINAGE_AREA"
 ) AS
 WITH
-/* ---------- Lookups used by MACP ---------- */
+/* ============================================================================
+   LOOKUP CTEs
+   ============================================================================ */
+
+/* Lookup used by MACP to convert Ivara manhole use values to Pioneer codes */
 mh_use_map AS (
     SELECT 'COMBINED' AS ivara_mh_use, 'CB' AS pioneers_code FROM dual
     UNION ALL SELECT 'FOUNDATION DRAIN', 'SW' FROM dual
@@ -65,7 +95,9 @@ mh_use_map AS (
     UNION ALL SELECT 'STORM', 'SW' FROM dual
 ),
 
-/* ---------- Shared CLOB-safe HTML cleaner (materialize once) ---------- */
+/* Shared CLOB-safe HTML cleaner.
+   This cleans long description HTML once and materializes it for re-use.
+   The result becomes ADDITIONAL_INFORMATION in the output. */
 clean_longdesc AS (
     SELECT /*+ MATERIALIZE */
         a.workordertaskoi,
@@ -116,7 +148,10 @@ clean_longdesc AS (
         mnt.workordertask a
 ),
 
-/* ============================ MACP (Manhole & Catch Basin) ============================ */
+/* ============================================================================
+   MACP BASE
+   Pulls source data for manholes and catch basins.
+   ============================================================================ */
 macp_base AS (
     SELECT
         wo.wonumber || '.' || a.tasknumber                 AS work_orders_number,
@@ -130,6 +165,8 @@ macp_base AS (
         e.epdrfacilityworkhistoryoi,
         e.createdate_dttm,
         e.lastupdate_dttm,
+
+        /* MACP access type derived from facility type / unknown type */
         CASE
             WHEN e1.facilitytype = 10 AND ep2.unknfactype = 3 THEN 'AMH'
             WHEN e1.facilitytype = 10 AND ep2.unknfactype = 2 THEN 'ACB'
@@ -137,6 +174,8 @@ macp_base AS (
             WHEN e1.facilitytype = 2 THEN 'ACB'
             ELSE NULL
         END                                                AS access_type,
+
+        /* Strip MH / CB prefixes for display */
         CASE
             WHEN e1.facilitytype = 1 THEN REGEXP_REPLACE(e1.facilityid, '^MH', '')
             WHEN e1.facilitytype = 2 THEN REGEXP_REPLACE(e1.facilityid, '^CB', '')
@@ -144,10 +183,13 @@ macp_base AS (
             WHEN e1.facilitytype = 10 AND ep2.unknfactype = 2 THEN REGEXP_REPLACE(e1.facilityid, '^CB', '')
             ELSE NULL
         END                                                AS manhole_number,
+
         a.uuid                                             AS work_order_task_uuid,
         wo.uuid                                            AS work_order_uuid,
         e.uuid                                             AS dr_uuid,
         ep2.unknfactype                                    AS unknown_type,
+
+        /* MACP branch only includes manholes and catch basins */
         CASE
             WHEN e1.facilitytype IN (1, 2) THEN 'MACP'
             WHEN e1.facilitytype = 10 AND ep2.unknfactype IN (2, 3) THEN 'MACP'
@@ -175,7 +217,7 @@ macp_base AS (
         cb.depth_fl                                        AS cb_depth_fl,
         cb.framecover                                      AS cb_framecover,
 
-        /* MACP-only reference (for CB / Unknown 2/3) */
+        /* For some MACP records, use facility id as pipe segment reference */
         CASE
             WHEN (e1.facilitytype = 2 OR (e1.facilitytype = 10 AND ep2.unknfactype IN (2, 3))) THEN e1.facilityid
             ELSE NULL
@@ -195,7 +237,11 @@ macp_base AS (
          OR (e1.facilitytype = 10 AND ep2.unknfactype IN (2, 3)))
 ),
 
-/* ============================ PACP (Pipes) ============================ */
+/* ============================================================================
+   PACP BASE
+   Pulls source data for mainline pipes.
+   This is the only branch where the elevation/depth fields are populated.
+   ============================================================================ */
 pacp_base AS (
     SELECT
         wo.wonumber || '.' || a.tasknumber                 AS work_orders_number,
@@ -209,6 +255,8 @@ pacp_base AS (
         e.epdrfacilityworkhistoryoi,
         e.createdate_dttm,
         e.lastupdate_dttm,
+
+        /* Raw pipe attributes from EPDRPIPE */
         ep1.material                                       AS raw_material,
         ep1.shape                                          AS raw_shape,
         ep1.wwtype                                         AS raw_wwtype,
@@ -216,26 +264,38 @@ pacp_base AS (
         ep1.usfacilityid                                   AS upstream_mh,
         ep1.dsfacilityid                                   AS downstream_mh,
         ep1.diameter_fl                                    AS raw_diameter_fl,
+
+        /* Upstream elevations */
         ep1.usgroundelev_fl                                AS raw_usgroundelev_fl,
         ep1.usinvertelev_fl                                AS raw_usinvertelev_fl,
+
+        /* Downstream elevations */
         ep1.dsgroundelev_fl                                AS raw_dsgroundelev_fl,
         ep1.dsinvertelev_fl                                AS raw_dsinvertelev_fl,
+
         ep1.location                                       AS raw_location,
         ep1.length_fl                                      AS raw_length_fl,
         ep1.yearconst                                      AS raw_yearconst,
         ep1.usneighbour                                    AS raw_usneighbour,
+
+        /* PACP branch includes facility type 8 and selected unknown types */
         CASE
             WHEN e1.facilitytype = 8 THEN 'PACP'
             WHEN e1.facilitytype = 10 AND ep2.unknfactype IN (4, 5, 6, 7, 8) THEN 'PACP'
             ELSE NULL
         END                                                AS inspection_type,
+
         'Pipe'                                             AS pip_type,
+
+        /* Base pipe reference:
+           strips PIP / CBL prefixes if present */
         CASE
             WHEN ep1.pipeid IS NULL THEN NULL
             WHEN UPPER(ep1.pipeid) LIKE 'PIP%' THEN SUBSTR(ep1.pipeid, 4)
             WHEN UPPER(ep1.pipeid) LIKE 'CBL%' THEN SUBSTR(ep1.pipeid, 4)
             ELSE ep1.pipeid
         END                                                AS base_pipe_ref,
+
         ep2.unknfactype                                    AS unknown_type,
         a.uuid                                             AS work_order_task_uuid,
         wo.uuid                                            AS work_order_uuid,
@@ -254,7 +314,10 @@ pacp_base AS (
         OR (e1.facilitytype = 10 AND ep2.unknfactype IN (4, 5, 6, 7, 8))
 ),
 
-/* ============================ LACP (Service Connections) ============================ */
+/* ============================================================================
+   LACP BASE
+   Pulls source data for service connections / laterals.
+   ============================================================================ */
 lacp_base AS (
     SELECT
         wo.wonumber || '.' || a.tasknumber                 AS work_orders_number,
@@ -277,10 +340,13 @@ lacp_base AS (
         esc.wass_appid                                     AS lacp_wass_appid,
         'LACP'                                             AS inspection_type,
         'Service Connection'                               AS pip_type,
+
+        /* Trim final dash suffix from WASS_APPID when present */
         CASE
             WHEN INSTR(esc.wass_appid, '-', -1) > 1 THEN SUBSTR(esc.wass_appid, 1, INSTR(esc.wass_appid, '-', -1) - 1)
             ELSE esc.wass_appid
         END                                                AS base_pipe_ref,
+
         ep2.unknfactype                                    AS unknown_type,
         a.uuid                                             AS work_order_task_uuid,
         wo.uuid                                            AS work_order_uuid,
@@ -299,7 +365,12 @@ lacp_base AS (
         OR (e1.facilitytype = 10 AND ep2.unknfactype IN (6, 7))
 ),
 
-/* ============================ Normalize each branch (typed) ============================ */
+/* ============================================================================
+   MACP OUTPUT NORMALIZATION
+   Converts MACP source columns into the final unified output shape.
+   Elevation / grade-to-invert fields are NULL here because they are not used
+   for this branch in the current design.
+   ============================================================================ */
 macp_out AS (
     SELECT
         CAST(b.work_orders_number AS VARCHAR2(100))          AS work_orders_number,
@@ -445,6 +516,11 @@ macp_out AS (
             ))
 ),
 
+/* ============================================================================
+   PACP OUTPUT NORMALIZATION
+   Converts PACP source columns into the final unified output shape.
+   This is the important branch for the 4 elevation/depth fields.
+   ============================================================================ */
 pacp_out AS (
     SELECT
         CAST(b.work_orders_number AS VARCHAR2(100))    AS work_orders_number,
@@ -460,6 +536,8 @@ pacp_out AS (
         CAST(b.lastupdate_dttm AS DATE)                AS lastupdate_dttm,
         CAST(b.inspection_type AS VARCHAR2(20))        AS inspection_type,
         CAST(b.pip_type AS VARCHAR2(200))              AS pip_type,
+
+        /* Normalize pipe use codes */
         CAST(
             CASE
                 WHEN UPPER(TRIM(b.raw_wwtype)) = 'FOUNDATION DRAIN' THEN 'SW'
@@ -472,8 +550,11 @@ pacp_out AS (
             END
             AS VARCHAR2(50)
         )                                             AS pipe_use,
+
+        /* Translate material and shape using mapping tables where possible */
         CAST(COALESCE(mc.pioneers_code, b.raw_material) AS VARCHAR2(200)) AS material,
         CAST(sc.pioneers_code AS VARCHAR2(20))         AS shape,
+
         CAST(NULL AS VARCHAR2(50))                     AS access_type,
         CAST(NULL AS VARCHAR2(200))                    AS manhole_number,
         CAST(NULL AS VARCHAR2(50))                     AS mh_use,
@@ -485,6 +566,8 @@ pacp_out AS (
         CAST(NULL AS NUMBER)                           AS wall_depth,
         CAST(NULL AS NUMBER)                           AS elevation,
         CAST(NULL AS VARCHAR2(100))                    AS frame_material,
+
+        /* For unknown facility types 4/5, keep facility_id directly */
         CAST(
             CASE
                 WHEN b.facility_type = 10 AND b.unknown_type IN (4, 5) THEN b.facility_id
@@ -492,6 +575,7 @@ pacp_out AS (
             END
             AS VARCHAR2(200)
         )                                             AS pipe_segment_reference,
+
         CAST(NULL AS VARCHAR2(200))                    AS lateral_segment_reference,
         CAST(b.upstream_mh AS VARCHAR2(200))           AS upstream_mh,
         CAST(b.downstream_mh AS VARCHAR2(200))         AS downstream_mh,
@@ -499,10 +583,29 @@ pacp_out AS (
         CAST(b.work_order_uuid AS VARCHAR2(100))       AS work_order_uuid,
         CAST(b.dr_uuid AS VARCHAR2(100))               AS dr_uuid,
         CAST(b.unknown_type AS NUMBER)                 AS unknown_type,
+
+        /* Pipe diameter/height */
         CAST(b.raw_diameter_fl AS NUMBER)              AS height,
 
-        /* ---- Elevations and computed invert-depths (rounded to 4 decimals, NULL-safe) ---- */
+        /* --------------------------------------------------------------------
+           ELEVATION / GRADE-TO-INVERT LOGIC
+           --------------------------------------------------------------------
+
+           UP_ELEVATION and DOWN_ELEVATION are the ground elevations.
+           UP_GRADE_TO_INVERT and DOWN_GRADE_TO_INVERT are computed depths:
+               depth = ground elevation - invert elevation
+
+           So:
+               upstream invert elevation   = up_elevation   - up_grade_to_invert
+               downstream invert elevation = down_elevation - down_grade_to_invert
+
+           This is depth, not slope.
+           -------------------------------------------------------------------- */
+
+        /* Ground elevation at the upstream end */
         CAST(b.raw_usgroundelev_fl AS NUMBER)          AS up_elevation,
+
+        /* Upstream depth from ground to invert */
         CAST(
             CASE
                 WHEN b.raw_usgroundelev_fl IS NULL OR b.raw_usinvertelev_fl IS NULL
@@ -512,7 +615,10 @@ pacp_out AS (
             AS NUMBER
         )                                              AS up_grade_to_invert,
 
+        /* Ground elevation at the downstream end */
         CAST(b.raw_dsgroundelev_fl AS NUMBER)          AS down_elevation,
+
+        /* Downstream depth from ground to invert */
         CAST(
             CASE
                 WHEN b.raw_dsgroundelev_fl IS NULL OR b.raw_dsinvertelev_fl IS NULL
@@ -535,6 +641,11 @@ pacp_out AS (
             ON UPPER(TRIM(sc.ivara_shape)) = UPPER(TRIM(b.raw_shape))
 ),
 
+/* ============================================================================
+   LACP OUTPUT NORMALIZATION
+   Converts LACP source columns into the final unified output shape.
+   Elevation / grade-to-invert fields are NULL here in the current design.
+   ============================================================================ */
 lacp_out AS (
     SELECT
         CAST(b.work_orders_number AS VARCHAR2(100))    AS work_orders_number,
@@ -550,6 +661,8 @@ lacp_out AS (
         CAST(b.lastupdate_dttm AS DATE)                AS lastupdate_dttm,
         CAST(b.inspection_type AS VARCHAR2(20))        AS inspection_type,
         CAST(b.pip_type AS VARCHAR2(200))              AS pip_type,
+
+        /* Normalize service connection record type into pipe use code */
         CAST(
             CASE
                 WHEN UPPER(TRIM(b.lacp_recordtype)) = 'FOUNDATION DRAIN' THEN 'SW'
@@ -561,6 +674,7 @@ lacp_out AS (
             END
             AS VARCHAR2(50)
         )                                             AS pipe_use,
+
         CAST(COALESCE(mc_sc.pioneers_code, b.lacp_pipetype) AS VARCHAR2(200)) AS material,
         CAST(NULL AS VARCHAR2(20))                     AS shape,
         CAST(NULL AS VARCHAR2(50))                     AS access_type,
@@ -575,6 +689,8 @@ lacp_out AS (
         CAST(NULL AS NUMBER)                           AS elevation,
         CAST(NULL AS VARCHAR2(100))                    AS frame_material,
         CAST(NULL AS VARCHAR2(200))                    AS pipe_segment_reference,
+
+        /* For unknown service connection facility types 6/7, keep facility_id directly */
         CAST(
             CASE
                 WHEN b.facility_type = 10 AND b.unknown_type IN (6, 7) THEN b.facility_id
@@ -582,6 +698,7 @@ lacp_out AS (
             END
             AS VARCHAR2(200)
         )                                             AS lateral_segment_reference,
+
         CAST(NULL AS VARCHAR2(200))                    AS upstream_mh,
         CAST(NULL AS VARCHAR2(200))                    AS downstream_mh,
         CAST(b.work_order_task_uuid AS VARCHAR2(100))  AS work_order_task_uuid,
@@ -604,6 +721,11 @@ lacp_out AS (
             ON UPPER(TRIM(mc_sc.ivara_material)) = UPPER(TRIM(b.lacp_pipetype))
 )
 
+/* ============================================================================
+   FINAL OUTPUT
+   All three branches are aligned to the same column structure and combined.
+   UNION ALL is used because each record belongs to one inspection branch only.
+   ============================================================================ */
 SELECT
     "WORK_ORDERS_NUMBER",
     "WORK_ORDER_TASK_TITLE",
