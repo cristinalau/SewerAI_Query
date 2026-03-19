@@ -81,19 +81,32 @@
     - If multi-site support is needed, parameterize or remove the site guard.
     - Keep source/target column names synchronized when schemas evolve.
 
-  Owner:     Cristina Lau
-  Created:   Feb 24, 2026
-  Revised:   (Add date & summary of changes)
+  NOTE:
+    If classification does NOT match the above list ? the trigger does **NOTHING**.
 ==============================================================================*/
-
+--DROP TRIGGER TRG_WOT_TO_STG
 CREATE OR REPLACE TRIGGER TRG_WOT_TO_STG
 AFTER INSERT OR UPDATE OF
-  WOTASKTITLE, PLNDSTRTDATE_DTTM, WORKCLASSIFI_OI  -- deliberately exclude task.PLNDCOMPDATE_DTTM
+  WOTASKTITLE, PLNDSTRTDATE_DTTM, WORKCLASSIFI_OI
 ON MNT.WORKORDERTASK
 FOR EACH ROW
 DECLARE
   c_site_oi CONSTANT NUMBER := 58;
 BEGIN
+  --------------------------------------------------------------------
+  -- 1) EARLY EXIT: Process ONLY approved classifications
+  --------------------------------------------------------------------
+  IF :NEW.WORKCLASSIFI_OI NOT IN (
+        209, 211, 215, 266, 442, 462,
+        183, 196, 207, 256, 263
+     )
+  THEN
+    RETURN;   -- Do nothing for unapproved classifications (e.g., 435)
+  END IF;
+
+  --------------------------------------------------------------------
+  -- 2) MERGE into staging table using the latest task + WO information
+  --------------------------------------------------------------------
   MERGE INTO CUSTOMERDATA.EPSEWERAI_WOT_STG s
   USING (
     SELECT
@@ -103,16 +116,15 @@ BEGIN
       :NEW.TASKNUMBER                                     AS tasknumber,
       NVL(:NEW.WOTASKTITLE, wo.TITLE)                     AS wotasktitle,
 
-      /* Hard guarantee: only from WORKORDERS.REQCOMPDATE_DTTM */
+      /* Always from WORKORDERS (business rule) */
       wo.REQCOMPDATE_DTTM                                 AS plndcompdate_dttm,
 
+      /* Prefer task-level start; fallback to WO-level start */
       NVL(:NEW.PLNDSTRTDATE_DTTM, wo.PLNDSTRTDATE_DTTM)   AS plndstrtdate_dttm,
 
-      CASE
-        WHEN :NEW.WORKCLASSIFI_OI IN (209, 211, 215, 266, 442, 462, 183, 196, 207, 256, 263)
-          THEN :NEW.WORKCLASSIFI_OI
-        ELSE 209
-      END                                                 AS workclassifi_oi
+      /* Classification already validated above */
+      :NEW.WORKCLASSIFI_OI                                AS workclassifi_oi
+
     FROM MNT.WORKORDERS wo
     WHERE wo.WORKORDERSOI = :NEW.WORKORDER_OI
       AND wo.SITE_OI      = c_site_oi
@@ -125,25 +137,42 @@ BEGIN
       s.WONUMBER           = src.WONUMBER,
       s.TASKNUMBER         = src.TASKNUMBER,
       s.WOTASKTITLE        = src.WOTASKTITLE,
-      s.PLNDCOMPDATE_DTTM  = src.PLNDCOMPDATE_DTTM,  -- fed from wo.REQCOMPDATE_DTTM only
+      s.PLNDCOMPDATE_DTTM  = src.PLNDCOMPDATE_DTTM,
       s.PLNDSTRTDATE_DTTM  = src.PLNDSTRTDATE_DTTM,
       s.WORKCLASSIFI_OI    = src.WORKCLASSIFI_OI,
       s.FEED_STATUS        = 'UPDATED'
     WHERE
-          NVL(s.WONUMBER, '~') <> NVL(src.WONUMBER, '~')
-       OR NVL(s.TASKNUMBER, -1) <> NVL(src.TASKNUMBER, -1)
-       OR NVL(s.WOTASKTITLE, '~') <> NVL(src.WOTASKTITLE, '~')
-       OR NVL(s.PLNDCOMPDATE_DTTM, DATE '1900-01-01') <> NVL(src.PLNDCOMPDATE_DTTM, DATE '1900-01-01')
-       OR NVL(s.PLNDSTRTDATE_DTTM, DATE '1900-01-01') <> NVL(src.PLNDSTRTDATE_DTTM, DATE '1900-01-01')
-       OR NVL(s.WORKCLASSIFI_OI, -1) <> NVL(src.WORKCLASSIFI_OI, -1)
+            NVL(s.WONUMBER, '~') <> NVL(src.WONUMBER, '~')
+        OR  NVL(s.TASKNUMBER, -1) <> NVL(src.TASKNUMBER, -1)
+        OR  NVL(s.WOTASKTITLE, '~') <> NVL(src.WOTASKTITLE, '~')
+        OR  NVL(s.PLNDCOMPDATE_DTTM, DATE '1900-01-01')
+            <> NVL(src.PLNDCOMPDATE_DTTM, DATE '1900-01-01')
+        OR  NVL(s.PLNDSTRTDATE_DTTM, DATE '1900-01-01')
+            <> NVL(src.PLNDSTRTDATE_DTTM, DATE '1900-01-01')
+        OR  NVL(s.WORKCLASSIFI_OI, -1) <> NVL(src.WORKCLASSIFI_OI, -1)
 
   WHEN NOT MATCHED THEN
     INSERT (
-      TASK_UUID, WORKORDER_UUID, WONUMBER, TASKNUMBER, WOTASKTITLE,
-      PLNDCOMPDATE_DTTM, PLNDSTRTDATE_DTTM, WORKCLASSIFI_OI, FEED_STATUS
+      TASK_UUID,
+      WORKORDER_UUID,
+      WONUMBER,
+      TASKNUMBER,
+      WOTASKTITLE,
+      PLNDCOMPDATE_DTTM,
+      PLNDSTRTDATE_DTTM,
+      WORKCLASSIFI_OI,
+      FEED_STATUS
     )
     VALUES (
-      src.TASK_UUID, src.WORKORDER_UUID, src.WONUMBER, src.TASKNUMBER, src.WOTASKTITLE,
-      src.PLNDCOMPDATE_DTTM, src.PLNDSTRTDATE_DTTM, src.WORKCLASSIFI_OI, 'NEW'
+      src.TASK_UUID,
+      src.WORKORDER_UUID,
+      src.WONUMBER,
+      src.TASKNUMBER,
+      src.WOTASKTITLE,
+      src.PLNDCOMPDATE_DTTM,
+      src.PLNDSTRTDATE_DTTM,
+      src.WORKCLASSIFI_OI,
+      'NEW'
     );
+
 END TRG_WOT_TO_STG;
